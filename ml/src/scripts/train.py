@@ -7,6 +7,7 @@ import warnings
 from pathlib import Path
 
 import lightgbm as lgb
+import pandas as pd
 import polars as pl
 from sklearn.metrics import mean_absolute_error
 
@@ -34,7 +35,7 @@ def feature_columns(df: pl.DataFrame) -> list[str]:
 def to_pandas_features(df: pl.DataFrame, features: list[str]):
     X = df.select(features).to_pandas()
     # Position as a category so the model can learn QB/RB/WR/TE differences
-    X["position"] = df["position"].to_pandas().astype("category")
+    X["position"] = pd.Categorical(df["position"].to_list(), categories=["QB", "RB", "WR", "TE"])
     return X
 
 
