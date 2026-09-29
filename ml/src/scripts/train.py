@@ -10,7 +10,7 @@ import lightgbm as lgb
 import polars as pl
 from sklearn.metrics import mean_absolute_error
 
-# Newer LightGBM versions warn about eval_set
+# Newer LightGBM versions warn about eval_set; it still works, and older versions need it.
 warnings.filterwarnings("ignore", message=".*eval_set.*")
 pl.Config.set_tbl_rows(20)
 
@@ -27,7 +27,7 @@ def feature_columns(df: pl.DataFrame) -> list[str]:
     return [
         c for c in df.columns
         if c.endswith(("_avg3", "_avg5", "_szn", "_sd5"))
-        or c.startswith(("prior_games", "opp_"))
+        or c.startswith(("prior_games", "opp_", "vegas_"))
     ]
 
 
@@ -51,9 +51,12 @@ def main() -> None:
     df = pl.read_parquet(DATA_PATH)
     seasons = sorted(df["season"].unique().to_list())
 
-    # Default test season = the latest season that's finished
+    # Default test season = the latest season that's finished. The current season
+    # is only partly played, so the one before it is a fairer test.
     test_season = args.test_season or (seasons[-2] if len(seasons) > 2 else seasons[-1])
 
+    # Time-based split: train on the past, test on a season the model never saw.
+    # Anything after the test season is ignored here so we never train on the future.
     train = df.filter(pl.col("season") < test_season)
     test = df.filter(pl.col("season") == test_season)
     print(f"Train seasons: {sorted(train['season'].unique().to_list())}  ({train.height:,} rows)")
@@ -118,12 +121,12 @@ def main() -> None:
     print(by_pos, "\n")
 
     relevant = results.filter(pl.col("baseline") >= 8)
+    rel_base = (relevant["actual"] - relevant["baseline"]).abs().mean()
+    rel_model = (relevant["actual"] - relevant["model"]).abs().mean()
     print("Fantasy-relevant players (last-5 avg >= 8 pts):")
-    print(f"  rows: {relevant.height}")
-    print(f"  baseline MAE: {(relevant['actual'] - relevant['baseline']).abs().mean():.2f}")
-    print(f"  model MAE:    {(relevant['actual'] - relevant['model']).abs().mean():.2f}")
-
-    print("\n")
+    print(f"  rows: {relevant.height:,}")
+    print(f"  baseline MAE: {rel_base:.2f}")
+    print(f"  model MAE:    {rel_model:.2f}  ({(rel_base - rel_model) / rel_base * 100:+.1f}%)\n")
 
     print("Top 15 features the model relied on:")
     importance = (

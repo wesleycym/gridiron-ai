@@ -14,6 +14,7 @@ import polars as pl
 
 ML_ROOT = Path(__file__).resolve().parents[2]  # scripts -> src -> ml
 RAW_DIR = ML_ROOT / "data" / "raw" / "player_stats"
+SCHEDULES_PATH = ML_ROOT / "data" / "raw" / "schedules.parquet"
 OUT_PATH = ML_ROOT / "data" / "processed" / "training.parquet"
 
 POSITIONS = ["QB", "RB", "WR", "TE"]
@@ -127,11 +128,55 @@ def add_matchup_features(df: pl.DataFrame) -> pl.DataFrame:
     return df.join(allowed, on=["season", "week", "opponent_team", "position"], how="left")
 
 
+def add_vegas_features(df: pl.DataFrame) -> pl.DataFrame:
+    """
+    Pre-game betting lines. These are set before kickoff, so no leakage.
+
+    nflverse convention: spread_line > 0 means the HOME team is favored by that many points.
+    We flip it to each team's perspective, so vegas_spread > 0 always means "this team is favored".
+    Implied team total = how many points Vegas expects this team to score.
+    """
+    if not SCHEDULES_PATH.exists():
+        print("WARNING: no schedules.parquet found, skipping Vegas features. Run fetch_data.py.")
+        return df
+
+    games = (
+        pl.read_parquet(SCHEDULES_PATH)
+        .filter(pl.col("game_type") == "REG")
+        .select("season", "week", "home_team", "away_team", "spread_line", "total_line")
+        .with_columns(pl.col("spread_line", "total_line").cast(pl.Float64))
+    )
+    # One row per team per game, from that team's point of view
+    home = games.select(
+        "season", "week",
+        pl.col("home_team").alias("team"),
+        pl.col("spread_line").alias("vegas_spread"),
+        pl.col("total_line").alias("vegas_total"),
+        pl.lit(1).alias("vegas_is_home"),
+    )
+    away = games.select(
+        "season", "week",
+        pl.col("away_team").alias("team"),
+        (-pl.col("spread_line")).alias("vegas_spread"),
+        pl.col("total_line").alias("vegas_total"),
+        pl.lit(0).alias("vegas_is_home"),
+    )
+    lines = pl.concat([home, away]).with_columns(
+        ((pl.col("vegas_total") + pl.col("vegas_spread")) / 2).alias("vegas_implied_total")
+    )
+
+    out = df.join(lines, on=["season", "week", "team"], how="left")
+    missing = out["vegas_total"].null_count()
+    if missing:
+        print(f"Note: {missing:,} rows had no Vegas line (left as null)")
+    return out
+
+
 def finalize(df: pl.DataFrame) -> pl.DataFrame:
     feature_cols = [
         c for c in df.columns
         if c.endswith(("_avg3", "_avg5", "_szn", "_sd5"))
-        or c.startswith(("prior_games", "opp_"))
+        or c.startswith(("prior_games", "opp_", "vegas_"))
     ]
     targets = [pl.col(s).alias(f"y_{s}") for s in TARGET_STATS]
 
@@ -151,6 +196,7 @@ def main() -> None:
 
     df = add_player_features(df)
     df = add_matchup_features(df)
+    df = add_vegas_features(df)
     df = finalize(df)
 
     OUT_PATH.parent.mkdir(parents=True, exist_ok=True)
