@@ -81,27 +81,11 @@ def upcoming_rows(history: pl.DataFrame, schedules: pl.DataFrame, season: int, w
     return rows.with_columns([pl.lit(None, dtype=pl.Float64).alias(c) for c in STAT_COLS])
 
 
-def main() -> None:
-    parser = argparse.ArgumentParser(description="Predict fantasy ranges for a week.")
-    parser.add_argument("--season", type=int)
-    parser.add_argument("--week", type=int)
-    parser.add_argument("--show-actual", action="store_true",
-                        help="for a past week, add what each player actually scored")
-    args = parser.parse_args()
-
-    schedules = load_schedules()
-    if schedules is None:
-        raise SystemExit("schedules.parquet is required. Run fetch_data.py first.")
-    if args.season and args.week:
-        season, week = args.season, args.week
-    else:
-        season, week = next_unplayed_week(schedules)
-    print(f"Predicting {season} week {week}")
-    if week in EXCLUDE_WEEKS:
-        print(f"WARNING: week {week} is excluded from training (starters often rest). "
-              "Treat these numbers with extra caution.")
-
-    all_games = clean(load_raw())
+def predict_week(season: int, week: int, schedules: pl.DataFrame, all_games: pl.DataFrame) -> pl.DataFrame:
+    """
+    Predictions for every eligible player in one week. Reused by player.py.
+    all_games = clean(load_raw()) (passed in so callers can reuse it).
+    """
     # Only games strictly before the target week can be used
     before = (pl.col("season") < season) | ((pl.col("season") == season) & (pl.col("week") < week))
     history = all_games.filter(before)
@@ -127,9 +111,10 @@ def main() -> None:
 
     qs = meta["quantiles"]
     col = {q: i for i, q in enumerate(qs)}
-    out = feats.select(
+    return feats.select(
         "player_id", "player_display_name", "position", "team", "opponent_team",
-        "season", "week", "vegas_implied_total",
+        "season", "week",
+        "vegas_implied_total", "vegas_total", "vegas_spread", "vegas_is_home",
     ).with_columns(
         pl.Series("floor", preds[:, col[0.10]]).round(1),
         pl.Series("median", preds[:, col[0.50]]).round(1),
@@ -137,6 +122,30 @@ def main() -> None:
         *[pl.Series(f"q{int(q * 100):02d}", preds[:, i]).round(2) for i, q in enumerate(qs)],
         *[pl.Series(f"p_{t}plus", prob_over(preds, t, qs)).round(3) for t in THRESHOLDS],
     ).sort("median", descending=True)
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Predict fantasy ranges for a week.")
+    parser.add_argument("--season", type=int)
+    parser.add_argument("--week", type=int)
+    parser.add_argument("--show-actual", action="store_true",
+                        help="for a past week, add what each player actually scored")
+    args = parser.parse_args()
+
+    schedules = load_schedules()
+    if schedules is None:
+        raise SystemExit("schedules.parquet is required. Run fetch_data.py first.")
+    if args.season and args.week:
+        season, week = args.season, args.week
+    else:
+        season, week = next_unplayed_week(schedules)
+    print(f"Predicting {season} week {week}")
+    if week in EXCLUDE_WEEKS:
+        print(f"WARNING: week {week} is excluded from training (starters often rest). "
+              "Treat these numbers with extra caution.")
+
+    all_games = clean(load_raw())
+    out = predict_week(season, week, schedules, all_games)
 
     if args.show_actual:
         actual = all_games.filter((pl.col("season") == season) & (pl.col("week") == week))

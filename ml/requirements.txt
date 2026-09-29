@@ -2,3 +2,9 @@ python ml/src/scripts/fetch_data.py
 python ml/src/scripts/build_dataset.py
 python ml/src/scripts/train_quantiles.py --test-season 2026
 python ml/src/scripts/predict.py
+
+-- If you want to view a specific player -- 
+python ml/src/scripts/player.py "Puka Nacua"
+python ml/src/scripts/player.py nacua                  # partial names work
+python ml/src/scripts/player.py "Josh Allen" --games 10
+python ml/src/scripts/player.py mahomes --season 2025 --week 12   # any past week
