@@ -8,6 +8,7 @@ from pathlib import Path
 
 import lightgbm as lgb
 import numpy as np
+import pandas as pd
 import polars as pl
 
 warnings.filterwarnings("ignore", message=".*eval_set.*")
@@ -19,13 +20,12 @@ OUT_DIR = ML_ROOT / "models" / "quantiles"
 
 TARGET = "y_fantasy_points_ppr"
 BASELINE_COL = "fantasy_points_ppr_avg5"
+POSITIONS = ["QB", "RB", "WR", "TE"]
 QUANTILES = [0.05, 0.10, 0.25, 0.50, 0.75, 0.90, 0.95]
 THRESHOLDS = [10, 15, 20, 25]  # "chance of X+ points" that we check for calibration
 
 
-# --------------------------------------------------------------------------------------
 # Features (same rule as train.py / build_dataset.py)
-# --------------------------------------------------------------------------------------
 def feature_columns(df: pl.DataFrame) -> list[str]:
     return [
         c for c in df.columns
@@ -36,13 +36,12 @@ def feature_columns(df: pl.DataFrame) -> list[str]:
 
 def to_pandas_features(df: pl.DataFrame, features: list[str]):
     X = df.select(features).to_pandas()
-    X["position"] = df["position"].to_pandas().astype("category")
+    # Fixed category list, so training and prediction always encode positions the same way
+    X["position"] = pd.Categorical(df["position"].to_list(), categories=POSITIONS)
     return X
 
 
-# --------------------------------------------------------------------------------------
 # Turning quantile predictions into probabilities (the backend will reuse this)
-# --------------------------------------------------------------------------------------
 def fix_crossing(preds: np.ndarray) -> np.ndarray:
     """Separate models can occasionally predict q25 > q50. Sorting each row fixes that."""
     return np.sort(preds, axis=1)
@@ -69,9 +68,36 @@ def prob_over(preds: np.ndarray, threshold: float, quantiles=QUANTILES) -> np.nd
     return 1.0 - cdf
 
 
-# --------------------------------------------------------------------------------------
 # Scoring
-# --------------------------------------------------------------------------------------
+def apply_offsets(preds: np.ndarray, positions, offsets: dict) -> np.ndarray:
+    """Shift each quantile prediction by its calibration offset for that position."""
+    out = preds.copy()
+    positions = np.asarray(positions)
+    for pos, off in offsets.items():
+        mask = positions == pos
+        out[mask] += np.array(off)[None, :]
+    return fix_crossing(out)
+
+
+def fit_offsets(y_cal: np.ndarray, preds_cal: np.ndarray, positions, min_rows: int = 150) -> dict:
+    """
+    Conformal calibration. On a season the models were NOT fit on, find how far each
+    quantile prediction needs to move so that, e.g., exactly 10% of scores land below q10.
+    Done per position, since QBs and TEs miss in different ways.
+    """
+    positions = np.asarray(positions)
+    resid = y_cal[:, None] - preds_cal
+    global_off = [float(np.quantile(resid[:, i], q)) for i, q in enumerate(QUANTILES)]
+    offsets = {}
+    for pos in POSITIONS:
+        mask = positions == pos
+        if mask.sum() >= min_rows:
+            offsets[pos] = [float(np.quantile(resid[mask, i], q)) for i, q in enumerate(QUANTILES)]
+        else:
+            offsets[pos] = global_off
+    return offsets
+
+
 def pinball_loss(y: np.ndarray, pred: np.ndarray, q: float) -> float:
     """Standard loss for quantile predictions. Lower is better."""
     diff = y - pred
@@ -133,14 +159,26 @@ def main() -> None:
 
     # ---- Train one model per quantile -------------------------------------------------
     OUT_DIR.mkdir(parents=True, exist_ok=True)
-    cols = []
+    X_cal, y_cal = X_train[~fit_mask], y_train[~fit_mask]
+    cols, cal_cols = [], []
     for q in QUANTILES:
         print(f"Training q{int(q * 100):02d}...", end=" ", flush=True)
-        m = train_one(q, X_train[fit_mask], y_train[fit_mask], X_train[~fit_mask], y_train[~fit_mask])
+        m = train_one(q, X_train[fit_mask], y_train[fit_mask], X_cal, y_cal)
         cols.append(m.predict(X_test))
+        if len(y_cal):
+            cal_cols.append(m.predict(X_cal))
         m.booster_.save_model(str(OUT_DIR / f"lgbm_q{int(q * 100):02d}.txt"))
         print(f"{m.booster_.num_trees()} trees")
-    model_preds = fix_crossing(np.column_stack(cols))
+    raw_preds = fix_crossing(np.column_stack(cols))
+
+    # ---- Calibrate on the last training season (which the models weren't fit on) -------
+    if len(y_cal):
+        cal_positions = train.filter(pl.Series(~fit_mask))["position"].to_numpy()
+        offsets = fit_offsets(y_cal, fix_crossing(np.column_stack(cal_cols)), cal_positions)
+    else:
+        offsets = {p: [0.0] * len(QUANTILES) for p in POSITIONS}
+    test_positions = test["position"].to_numpy()
+    model_preds = apply_offsets(raw_preds, test_positions, offsets)
 
     # ---- 1. Pinball loss: overall quality of the ranges --------------------------------
     print("\nPinball loss by quantile (lower is better)")
@@ -156,12 +194,22 @@ def main() -> None:
 
     # ---- 2. Coverage: is q10 actually beaten 90% of the time? --------------------------
     print("\nCoverage: share of actual scores below each predicted quantile (should match)")
+    print(f"  {'':>4}  {'target':>6}  {'before calib':>12}  {'after calib':>11}")
     for i, q in enumerate(QUANTILES):
-        share = float(np.mean(y_test <= model_preds[:, i]))
-        flag = "" if abs(share - q) < 0.03 else "  <- off"
-        print(f"  q{int(q * 100):02d}: {share:6.1%}  (target {q:.0%}){flag}")
-    inside = np.mean((y_test >= model_preds[:, 1]) & (y_test <= model_preds[:, 5]))
-    print(f"  80% range (q10 to q90) contained the actual score {inside:.1%} of the time")
+        before = float(np.mean(y_test <= raw_preds[:, i]))
+        after = float(np.mean(y_test <= model_preds[:, i]))
+        flag = "" if abs(after - q) < 0.03 else "  <- off"
+        print(f"  q{int(q * 100):02d}  {q:>6.0%}  {before:>12.1%}  {after:>11.1%}{flag}")
+    for label, p in [("before", raw_preds), ("after", model_preds)]:
+        inside = np.mean((y_test >= p[:, 1]) & (y_test <= p[:, 5]))
+        print(f"  80% range contained the actual score {inside:.1%} of the time ({label} calibration)")
+
+    print("\nCoverage by position (after calibration): q10 / q50 / q90, targets 10% / 50% / 90%")
+    for pos in POSITIONS:
+        mk = test_positions == pos
+        if mk.sum():
+            c = [float(np.mean(y_test[mk] <= model_preds[mk, i])) for i in (1, 3, 5)]
+            print(f"  {pos}: {c[0]:5.1%} / {c[1]:5.1%} / {c[2]:5.1%}   ({mk.sum():,} rows)")
 
     # ---- 3. Threshold probabilities: when we say 30%, does it happen 30% of the time? --
     print("\nCalibration of 'chance of X+ points' (fantasy-relevant players, avg5 >= 8)")
@@ -204,6 +252,8 @@ def main() -> None:
 
     (OUT_DIR / "meta.json").write_text(json.dumps({
         "quantiles": QUANTILES,
+        "positions": POSITIONS,
+        "offsets": offsets,
         "features": list(X_train.columns),
         "test_season": test_season,
         "avg_pinball_model": tot_m / len(QUANTILES),
