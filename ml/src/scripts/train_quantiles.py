@@ -39,7 +39,9 @@ def to_pandas_features(df: pl.DataFrame, features: list[str]):
     return X
 
 
+# --------------------------------------------------------------------------------------
 # Turning quantile predictions into probabilities (the backend will reuse this)
+# --------------------------------------------------------------------------------------
 def fix_crossing(preds: np.ndarray) -> np.ndarray:
     """Separate models can occasionally predict q25 > q50. Sorting each row fixes that."""
     return np.sort(preds, axis=1)
@@ -87,7 +89,9 @@ def prob_over(preds: np.ndarray, threshold: float, quantiles=QUANTILES) -> np.nd
     return 1.0 - cdf
 
 
+# --------------------------------------------------------------------------------------
 # Scoring
+# --------------------------------------------------------------------------------------
 def apply_offsets(preds: np.ndarray, positions, offsets: dict) -> np.ndarray:
     """Shift each quantile prediction by its calibration offset for that position."""
     out = preds.copy()
@@ -115,6 +119,41 @@ def fit_offsets(y_cal: np.ndarray, preds_cal: np.ndarray, positions, min_rows: i
         else:
             offsets[pos] = global_off
     return offsets
+
+
+def fit_level(y_cal: np.ndarray, preds_cal: np.ndarray, positions, min_rows: int = 150) -> dict:
+    """
+    Fix the "pull toward the middle": on the calibration season, fit
+        actual = a + b * projected_mean      (per position)
+    b > 1 means the model's projections are too squeezed together, so we stretch them:
+    high projections move up, low projections move down.
+    """
+    positions = np.asarray(positions)
+    m = mean_from_quantiles(preds_cal)
+    b_all, a_all = np.polyfit(m, y_cal, 1)
+    fit = {}
+    for pos in POSITIONS:
+        mask = positions == pos
+        if mask.sum() >= min_rows:
+            b, a = np.polyfit(m[mask], y_cal[mask], 1)
+            fit[pos] = [float(a), float(b)]
+        else:
+            fit[pos] = [float(a_all), float(b_all)]
+    return fit
+
+
+def apply_level(preds: np.ndarray, positions, level: dict) -> np.ndarray:
+    """Shift each player's whole range so his mean lands where fit_level says it should."""
+    if not level:
+        return preds
+    out = preds.copy()
+    positions = np.asarray(positions)
+    m = mean_from_quantiles(preds)
+    for pos, (a, b) in level.items():
+        mask = positions == pos
+        target = a + b * m[mask]
+        out[mask] += (target - m[mask])[:, None]
+    return out
 
 
 def pinball_loss(y: np.ndarray, pred: np.ndarray, q: float) -> float:
@@ -148,6 +187,9 @@ def train_one(q: float, X_fit, y_fit, X_val, y_val):
 def main() -> None:
     parser = argparse.ArgumentParser(description="Train quantile models for PPR points.")
     parser.add_argument("--test-season", type=int, default=None)
+    parser.add_argument("--level-fix", action="store_true",
+                        help="experimental: stretch projections toward the extremes. Off by "
+                             "default: tested on 2025, it slightly hurt accuracy and calibration")
     args = parser.parse_args()
 
     df = pl.read_parquet(DATA_PATH)
@@ -193,11 +235,21 @@ def main() -> None:
     # ---- Calibrate on the last training season (which the models weren't fit on) -------
     if len(y_cal):
         cal_positions = train.filter(pl.Series(~fit_mask))["position"].to_numpy()
-        offsets = fit_offsets(y_cal, fix_crossing(np.column_stack(cal_cols)), cal_positions)
+        cal_raw = fix_crossing(np.column_stack(cal_cols))
+        offsets = fit_offsets(y_cal, cal_raw, cal_positions)
+        level_fit = (fit_level(y_cal, apply_offsets(cal_raw, cal_positions, offsets), cal_positions)
+                     if args.level_fix else {})
     else:
         offsets = {p: [0.0] * len(QUANTILES) for p in POSITIONS}
+        level_fit = {}
     test_positions = test["position"].to_numpy()
-    model_preds = apply_offsets(raw_preds, test_positions, offsets)
+    offset_preds = apply_offsets(raw_preds, test_positions, offsets)       # ranges calibrated
+    model_preds = apply_level(offset_preds, test_positions, level_fit)     # + level stretched
+
+    if level_fit:
+        print("\nLevel fix learned from the calibration season (actual = a + b * projected):")
+    for pos, (a, b) in level_fit.items():
+        print(f"  {pos}: b = {b:.2f}  ({'stretches' if b > 1 else 'squeezes'} projections), a = {a:+.2f}")
 
     # ---- 1. Pinball loss: overall quality of the ranges --------------------------------
     print("\nPinball loss by quantile (lower is better)")
@@ -229,6 +281,55 @@ def main() -> None:
         if mk.sum():
             c = [float(np.mean(y_test[mk] <= model_preds[mk, i])) for i in (1, 3, 5)]
             print(f"  {pos}: {c[0]:5.1%} / {c[1]:5.1%} / {c[2]:5.1%}   ({mk.sum():,} rows)")
+
+    # ---- Level check: are high projections systematically too low (or too high)? -------
+    # Group players by the model's mean projection, then compare with what they scored.
+    # If the "20+" group actually averages 23, the model is shrinking stars toward the middle.
+    bins = [5, 10, 15, 20]
+    labels = ["<5", "5-10", "10-15", "15-20", "20+"]
+
+    def level_frame(preds: np.ndarray) -> pl.DataFrame:
+        return pl.DataFrame({
+            "position": test_positions, "projected": mean_from_quantiles(preds), "actual": y_test,
+        }).with_columns(pl.col("projected").cut(bins, labels=labels).alias("proj_bucket"))
+
+    level_before, level = level_frame(offset_preds), level_frame(model_preds)
+
+    def level_table(df: pl.DataFrame) -> pl.DataFrame:
+        return (
+            df.group_by("proj_bucket")
+            .agg(
+                pl.len().alias("rows"),
+                pl.col("projected").mean().round(1).alias("avg_projected"),
+                pl.col("actual").mean().round(1).alias("avg_actual"),
+            )
+            .with_columns((pl.col("avg_actual") - pl.col("avg_projected")).round(1).alias("actual_minus_proj"))
+            .sort("avg_projected")
+        )
+
+    print("\nLevel check: mean projection vs actual average, by projection size")
+    print("(actual_minus_proj should be near 0 in every row; a growing positive number")
+    print(" in the top rows means the model undersells high-end players)")
+    rel = base_test >= 8
+    if level_fit:
+        print("\nAll positions, BEFORE level fix")
+        print(level_table(level_before))
+        print("\nAll positions, AFTER level fix")
+        print(level_table(level))
+        mae_b = float(np.mean(np.abs(y_test[rel] - level_before["projected"].to_numpy()[rel])))
+        mae_a = float(np.mean(np.abs(y_test[rel] - level["projected"].to_numpy()[rel])))
+        print(f"\nMean projection error, fantasy-relevant players: {mae_b:.2f} before -> {mae_a:.2f} after")
+    else:
+        print("\nAll positions")
+        print(level_table(level))
+        mae = float(np.mean(np.abs(y_test[rel] - level["projected"].to_numpy()[rel])))
+        print(f"\nMean projection error, fantasy-relevant players: {mae:.2f}")
+    print("\nBy position:")
+    for pos in POSITIONS:
+        sub = level.filter(pl.col("position") == pos)
+        if sub.height:
+            print(f"\n{pos}")
+            print(level_table(sub))
 
     # ---- 3. Threshold probabilities: when we say 30%, does it happen 30% of the time? --
     print("\nCalibration of 'chance of X+ points' (fantasy-relevant players, avg5 >= 8)")
@@ -273,6 +374,7 @@ def main() -> None:
         "quantiles": QUANTILES,
         "positions": POSITIONS,
         "offsets": offsets,
+        "level": level_fit,
         "features": list(X_train.columns),
         "test_season": test_season,
         "avg_pinball_model": tot_m / len(QUANTILES),

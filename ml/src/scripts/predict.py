@@ -18,7 +18,7 @@ from build_dataset import (
     build_features, clean, load_raw, load_schedules, team_game_lines,
 )
 from train_quantiles import (
-    apply_offsets, fix_crossing, mean_from_quantiles, prob_over, to_pandas_features,
+    apply_level, apply_offsets, fix_crossing, mean_from_quantiles, prob_over, to_pandas_features,
 )
 
 MODEL_DIR = ML_ROOT / "models" / "quantiles"
@@ -102,7 +102,9 @@ def predict_week(season: int, week: int, schedules: pl.DataFrame, all_games: pl.
     X = to_pandas_features(feats, [f for f in meta["features"] if f != "position"])
     X = X[meta["features"]]  # exact column order used in training
     raw = fix_crossing(np.column_stack([m.predict(X) for m in models]))
-    preds = apply_offsets(raw, feats["position"].to_numpy(), meta["offsets"])
+    positions = feats["position"].to_numpy()
+    preds = apply_offsets(raw, positions, meta["offsets"])
+    preds = apply_level(preds, positions, meta.get("level", {}))  # stretch fix, if trained with it
 
     qs = meta["quantiles"]
     col = {q: i for i, q in enumerate(qs)}
