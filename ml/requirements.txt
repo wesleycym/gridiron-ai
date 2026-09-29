@@ -1,0 +1,3 @@
+python ml/src/scripts/fetch_data.py
+python ml/src/scripts/build_dataset.py
+python ml/src/scripts/train.py
