@@ -1,4 +1,4 @@
 python ml/src/scripts/fetch_data.py
 python ml/src/scripts/build_dataset.py
-python ml/src/scripts/train.py
-python ml/src/scripts/train_quantiles.py
+python ml/src/scripts/train_quantiles.py --test-season 2026
+python ml/src/scripts/predict.py
