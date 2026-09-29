@@ -3,3 +3,5 @@ ml/data/raw/schedules.parquet
 ml/data/processed
 ml/models/lgbm_ppr.txt
 ml/models/quantiles
+ml/data/predictions
+ml/src/scripts/__pycache__
