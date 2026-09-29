@@ -5,13 +5,6 @@
             python ml/src/scripts/predict.py --season 2025 --week 10 --show-actual      # backtest a past week
 '''
 
-"""
-Predict fantasy outcome ranges for an upcoming week.
-For every player who's been active recently and whose team plays that
-week, we add a placeholder row for the upcoming game, run the SAME feature code used
-for training (which only looks at earlier games), then run the quantile models on it.
-"""
-
 import argparse
 import json
 from pathlib import Path
@@ -24,7 +17,9 @@ from build_dataset import (
     EXCLUDE_WEEKS, ML_ROOT, MIN_PRIOR_GAMES, STAT_COLS,
     build_features, clean, load_raw, load_schedules, team_game_lines,
 )
-from train_quantiles import apply_offsets, fix_crossing, prob_over, to_pandas_features
+from train_quantiles import (
+    apply_offsets, fix_crossing, mean_from_quantiles, prob_over, to_pandas_features,
+)
 
 MODEL_DIR = ML_ROOT / "models" / "quantiles"
 OUT_DIR = ML_ROOT / "data" / "predictions"
@@ -118,6 +113,7 @@ def predict_week(season: int, week: int, schedules: pl.DataFrame, all_games: pl.
     ).with_columns(
         pl.Series("floor", preds[:, col[0.10]]).round(1),
         pl.Series("median", preds[:, col[0.50]]).round(1),
+        pl.Series("mean", mean_from_quantiles(preds, qs)).round(1),
         pl.Series("ceiling", preds[:, col[0.90]]).round(1),
         *[pl.Series(f"q{int(q * 100):02d}", preds[:, i]).round(2) for i, q in enumerate(qs)],
         *[pl.Series(f"p_{t}plus", prob_over(preds, t, qs)).round(3) for t in THRESHOLDS],

@@ -25,7 +25,9 @@ QUANTILES = [0.05, 0.10, 0.25, 0.50, 0.75, 0.90, 0.95]
 THRESHOLDS = [10, 15, 20, 25]  # "chance of X+ points" that we check for calibration
 
 
+# --------------------------------------------------------------------------------------
 # Features (same rule as train.py / build_dataset.py)
+# --------------------------------------------------------------------------------------
 def feature_columns(df: pl.DataFrame) -> list[str]:
     return [
         c for c in df.columns
@@ -41,10 +43,33 @@ def to_pandas_features(df: pl.DataFrame, features: list[str]):
     return X
 
 
+# --------------------------------------------------------------------------------------
 # Turning quantile predictions into probabilities (the backend will reuse this)
+# --------------------------------------------------------------------------------------
 def fix_crossing(preds: np.ndarray) -> np.ndarray:
     """Separate models can occasionally predict q25 > q50. Sorting each row fixes that."""
     return np.sort(preds, axis=1)
+
+
+def _full_quantile_curve(preds: np.ndarray, quantiles=QUANTILES):
+    """Predicted quantiles plus linearly extended tails at probability 0 and 1."""
+    qs = np.array(quantiles)
+    lo_gap = preds[:, 1] - preds[:, 0]
+    hi_gap = preds[:, -1] - preds[:, -2]
+    q0 = preds[:, 0] - 2 * lo_gap - 1e-6
+    q1 = preds[:, -1] + 3 * hi_gap + 1e-6
+    return np.column_stack([q0, preds, q1]), np.concatenate([[0.0], qs, [1.0]])
+
+
+def mean_from_quantiles(preds: np.ndarray, quantiles=QUANTILES) -> np.ndarray:
+    """
+    Average expected score, from the predicted distribution.
+    Fantasy scores are lopsided (big games stretch the top end), so the mean usually
+    sits above the median. Most sites (ESPN, Yahoo) publish means.
+    """
+    vals, qs = _full_quantile_curve(preds, quantiles)
+    # Area under the quantile curve = the mean (trapezoid rule between known points)
+    return np.sum((vals[:, 1:] + vals[:, :-1]) / 2 * np.diff(qs)[None, :], axis=1)
 
 
 def prob_over(preds: np.ndarray, threshold: float, quantiles=QUANTILES) -> np.ndarray:
@@ -68,7 +93,9 @@ def prob_over(preds: np.ndarray, threshold: float, quantiles=QUANTILES) -> np.nd
     return 1.0 - cdf
 
 
+# --------------------------------------------------------------------------------------
 # Scoring
+# --------------------------------------------------------------------------------------
 def apply_offsets(preds: np.ndarray, positions, offsets: dict) -> np.ndarray:
     """Shift each quantile prediction by its calibration offset for that position."""
     out = preds.copy()

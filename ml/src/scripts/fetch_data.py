@@ -15,6 +15,7 @@ import nflreadpy as nfl
 ML_ROOT = Path(__file__).resolve().parents[2]  # scripts -> src -> ml
 RAW_DIR = ML_ROOT / "data" / "raw" / "player_stats"
 SCHEDULES_PATH = ML_ROOT / "data" / "raw" / "schedules.parquet"
+INJURIES_PATH = ML_ROOT / "data" / "raw" / "injuries.parquet"
 
 
 def cache_path(season: int) -> Path:
@@ -52,6 +53,19 @@ def update_schedules(seasons: list[int]) -> None:
     print(f"schedules: saved {df.height:,} games -> {SCHEDULES_PATH.relative_to(ML_ROOT)}")
 
 
+def update_injuries(season: int) -> None:
+    """Official injury reports (Out / Doubtful / Questionable + practice status)."""
+    print("injuries: downloading...")
+    try:
+        df = nfl.load_injuries(seasons=[season])
+    except Exception as e:
+        # Not fatal: reports may not be published yet, especially early in the week
+        print(f"injuries: not available ({e})")
+        return
+    df.write_parquet(INJURIES_PATH)
+    print(f"injuries: saved {df.height:,} rows -> {INJURIES_PATH.relative_to(ML_ROOT)}")
+
+
 def main() -> None:
     current = nfl.get_current_season()
 
@@ -65,6 +79,7 @@ def main() -> None:
     print(f"Fetching seasons {seasons[0]}-{seasons[-1]}\n")
     update_player_stats(seasons, force=args.force)
     update_schedules(seasons)
+    update_injuries(current)
 
 
 if __name__ == "__main__":
