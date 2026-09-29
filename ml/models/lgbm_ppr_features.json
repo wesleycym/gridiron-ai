@@ -59,9 +59,13 @@
     "fantasy_points_ppr_sd5",
     "opp_fp_allowed_avg4",
     "opp_fp_allowed_szn",
+    "vegas_spread",
+    "vegas_total",
+    "vegas_is_home",
+    "vegas_implied_total",
     "position"
   ],
   "test_season": 2025,
-  "test_mae": 4.313682512930305,
+  "test_mae": 4.300610019328426,
   "baseline_mae": 4.673751100158423
 }
