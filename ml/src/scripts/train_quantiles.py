@@ -25,15 +25,11 @@ QUANTILES = [0.05, 0.10, 0.25, 0.50, 0.75, 0.90, 0.95]
 THRESHOLDS = [10, 15, 20, 25]  # "chance of X+ points" that we check for calibration
 
 
-# --------------------------------------------------------------------------------------
 # Features (same rule as train.py / build_dataset.py)
-# --------------------------------------------------------------------------------------
 def feature_columns(df: pl.DataFrame) -> list[str]:
-    return [
-        c for c in df.columns
-        if c.endswith(("_avg3", "_avg5", "_szn", "_sd5"))
-        or c.startswith(("prior_games", "opp_", "vegas_"))
-    ]
+    """Shared with build_dataset.py so the feature list is defined in one place."""
+    from build_dataset import feature_columns as shared
+    return shared(df)
 
 
 def to_pandas_features(df: pl.DataFrame, features: list[str]):
@@ -43,9 +39,7 @@ def to_pandas_features(df: pl.DataFrame, features: list[str]):
     return X
 
 
-# --------------------------------------------------------------------------------------
 # Turning quantile predictions into probabilities (the backend will reuse this)
-# --------------------------------------------------------------------------------------
 def fix_crossing(preds: np.ndarray) -> np.ndarray:
     """Separate models can occasionally predict q25 > q50. Sorting each row fixes that."""
     return np.sort(preds, axis=1)
@@ -93,9 +87,7 @@ def prob_over(preds: np.ndarray, threshold: float, quantiles=QUANTILES) -> np.nd
     return 1.0 - cdf
 
 
-# --------------------------------------------------------------------------------------
 # Scoring
-# --------------------------------------------------------------------------------------
 def apply_offsets(preds: np.ndarray, positions, offsets: dict) -> np.ndarray:
     """Shift each quantile prediction by its calibration offset for that position."""
     out = preds.copy()

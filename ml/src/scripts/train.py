@@ -24,12 +24,9 @@ BASELINE_COL = "fantasy_points_ppr_avg5"  # "just use his last-5-game average"
 
 
 def feature_columns(df: pl.DataFrame) -> list[str]:
-    """Same rule build_dataset.py uses to name features."""
-    return [
-        c for c in df.columns
-        if c.endswith(("_avg3", "_avg5", "_szn", "_sd5"))
-        or c.startswith(("prior_games", "opp_", "vegas_"))
-    ]
+    """Shared with build_dataset.py so the feature list is defined in one place."""
+    from build_dataset import feature_columns as shared
+    return shared(df)
 
 
 def to_pandas_features(df: pl.DataFrame, features: list[str]):

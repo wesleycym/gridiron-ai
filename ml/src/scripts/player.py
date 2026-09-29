@@ -126,8 +126,13 @@ def role_table(raw: pl.DataFrame, team: str, pos: str, season: int, week: int,
             pl.col("fantasy_points_ppr").fill_null(0).mean().round(1).alias("ppr_avg"),
         )
         .with_columns(
-            (pl.col("car") / pl.col("car").sum() * 100).round(0).cast(pl.Int64).alias("car_%"),
-            (pl.col("tgt") / pl.col("tgt").sum() * 100).round(0).cast(pl.Int64).alias("tgt_%"),
+            # Guard against 0 / 0 (e.g. a WR group with no carries at all)
+            pl.when(pl.col("car").sum() > 0)
+            .then((pl.col("car") / pl.col("car").sum() * 100).round(0))
+            .otherwise(0).cast(pl.Int64).alias("car_%"),
+            pl.when(pl.col("tgt").sum() > 0)
+            .then((pl.col("tgt") / pl.col("tgt").sum() * 100).round(0))
+            .otherwise(0).cast(pl.Int64).alias("tgt_%"),
         )
         .sort(["car", "tgt"] if pos in ("RB", "QB") else ["tgt", "car"], descending=True)
         .with_row_index("_i")
