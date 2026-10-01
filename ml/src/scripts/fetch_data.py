@@ -12,38 +12,31 @@ from pathlib import Path
 
 import nflreadpy as nfl
 
-# Resolve paths
-ML_ROOT = Path(__file__).resolve().parents[2]   # scripts -> src -> ml
+ML_ROOT = Path(__file__).resolve().parents[2]  # scripts -> src -> ml
 RAW_DIR = ML_ROOT / "data" / "raw" / "player_stats"
+SCHEDULES_PATH = ML_ROOT / "data" / "raw" / "schedules.parquet"
+INJURIES_PATH = ML_ROOT / "data" / "raw" / "injuries.parquet"
+
 
 def cache_path(season: int) -> Path:
-    """One file per season, e.g. data/raw/player_stats/player_stats_2024.parquet"""
     return RAW_DIR / f"player_stats_{season}.parquet"
 
 
-def fetch_season(season: int):
-    """Download one season of player stats, one row per player per game."""
-    return nfl.load_player_stats(seasons=[season], summary_level="week")
-
-
-def update_cache(seasons: list[int], force: bool = False) -> None:
+def update_player_stats(seasons: list[int], force: bool = False) -> None:
     RAW_DIR.mkdir(parents=True, exist_ok=True)
     current_season = nfl.get_current_season()
 
     for season in seasons:
         path = cache_path(season)
-
-        # Refresh for every new game | Skip already cached games
-        is_current = season == current_season
-        if path.exists() and not is_current and not force:
+        # Finished seasons never change; the current one gets new games weekly.
+        if path.exists() and season != current_season and not force:
             print(f"{season}: already cached, skipping")
             continue
 
         print(f"{season}: downloading...")
         try:
-            df = fetch_season(season)
+            df = nfl.load_player_stats(seasons=[season], summary_level="week")
         except Exception as e:
-            # If seasons hasn't started yet
             print(f"{season}: failed ({e})")
             continue
 
@@ -51,10 +44,32 @@ def update_cache(seasons: list[int], force: bool = False) -> None:
         print(f"{season}: saved {df.height:,} rows -> {path.relative_to(ML_ROOT)}")
 
 
+def update_schedules(seasons: list[int]) -> None:
+    """Schedules are small, and lines for upcoming games change, so always refresh."""
+    print("schedules: downloading...")
+    df = nfl.load_schedules(seasons=seasons)
+    SCHEDULES_PATH.parent.mkdir(parents=True, exist_ok=True)
+    df.write_parquet(SCHEDULES_PATH)
+    print(f"schedules: saved {df.height:,} games -> {SCHEDULES_PATH.relative_to(ML_ROOT)}")
+
+
+def update_injuries(season: int) -> None:
+    """Official injury reports (Out / Doubtful / Questionable + practice status)."""
+    print("injuries: downloading...")
+    try:
+        df = nfl.load_injuries(seasons=[season])
+    except Exception as e:
+        # Not fatal: reports may not be published yet, especially early in the week
+        print(f"injuries: not available ({e})")
+        return
+    df.write_parquet(INJURIES_PATH)
+    print(f"injuries: saved {df.height:,} rows -> {INJURIES_PATH.relative_to(ML_ROOT)}")
+
+
 def main() -> None:
     current = nfl.get_current_season()
 
-    parser = argparse.ArgumentParser(description="Fetch and cache weekly player stats.")
+    parser = argparse.ArgumentParser(description="Fetch and cache NFL data.")
     parser.add_argument("--start", type=int, default=current - 4, help="first season to fetch")
     parser.add_argument("--end", type=int, default=current, help="last season to fetch")
     parser.add_argument("--force", action="store_true", help="re-download cached seasons")
@@ -62,7 +77,9 @@ def main() -> None:
 
     seasons = list(range(args.start, args.end + 1))
     print(f"Fetching seasons {seasons[0]}-{seasons[-1]}\n")
-    update_cache(seasons, force=args.force)
+    update_player_stats(seasons, force=args.force)
+    update_schedules(seasons)
+    update_injuries(current)
 
 
 if __name__ == "__main__":
