@@ -1,0 +1,19 @@
+# My fantasy roster: one player per line
+Lamar Jackson
+Omarion Hampton
+Bucky Irving
+Denzel Boston
+Amon Ra St Brown
+Jake Ferguson
+Dontayvion Wicks
+Texans D
+Brandon Aubrey
+
+#  QB    Lamar Jackson             18.6  (range 5.9-29.9)
+#  RB    Bucky Irving              13.9  (range 4.5-25.3)
+#  RB    Omarion Hampton           11.7  (range 4.1-21.0)
+#  WR    Amon-Ra St. Brown         17.1  (range 6.6-28.4)
+#  WR    Denzel Boston             10.6  (range 3.0-20.2)
+#  TE    Jake Ferguson              9.7  (range 2.4-18.1)
+#  FLEX  Dontayvion Wicks           9.2  (range 2.0-18.3)
+#        Projected total           90.8
